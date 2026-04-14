@@ -3,7 +3,9 @@ package com.tixy.api.event.repository;
 import com.tixy.api.event.dto.request.GetEventsRequest;
 import com.tixy.api.event.dto.response.GetEventResponse;
 import com.tixy.api.event.dto.response.GetEventSessionsResponse;
+import com.tixy.api.event.dto.response.GetRankedEventResponse;
 import com.tixy.api.event.enums.EventSessionStatus;
+import com.tixy.api.event.enums.EventStatus;
 import com.tixy.api.ticket.dto.response.TicketSaleDateResponse;
 import com.tixy.api.ticket.enums.TicketTypeStatus;
 import com.tixy.jooq.tixy.Tables;
@@ -15,8 +17,10 @@ import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Repository;
 
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static com.tixy.jooq.tixy.Tables.SEAT_SECTIONS;
 import static com.tixy.jooq.tixy.Tables.VENUES;
@@ -29,6 +33,7 @@ import static com.tixy.jooq.tixy.tables.TicketTypes.TICKET_TYPES;
 @RequiredArgsConstructor
 public class EventQueryRepository {
 
+    private static final long TOP_N = 10;
     private final DSLContext dsl;
 
     //하나라도 PENDING 상태가 아닌 ticket type 이 있다면 수정,삭제 불가능
@@ -108,12 +113,6 @@ public class EventQueryRepository {
         // 전체 count (페이징용)
         int total = dsl.fetchCount(query);
 
-        // 실제 데이터 조회
-//        List<GetEventResponse> results = query
-//                .orderBy(EVENTS.OPEN_DATE.asc())
-//                .limit(pageable.getPageSize())
-//                .offset(pageable.getOffset())
-//                .fetchInto(GetEventResponse.class);
         List<GetEventResponse> results = query
                 .orderBy(EVENTS.OPEN_DATE.asc())
                 .limit(pageable.getPageSize())
@@ -195,5 +194,126 @@ public class EventQueryRepository {
                 ));
 
         return new PageImpl<>(results, pageable, total);
+    }
+
+
+//    JOOQ - 상세 조회 + 카테고리 필터링 + Top N 컷
+//    category = null 이면 전체
+    public List<GetRankedEventResponse> fetchScheduleDetails(
+            List<Long> scheduleIds,
+            Map<Long, Double> scoreMap,
+            String category
+    ) {
+        var conditions = DSL.noCondition();
+
+        conditions = conditions.and(EVENTS.ID.in(scheduleIds));
+        conditions = conditions.and(EVENTS.DELETED_AT.isNull());
+
+        if (category != null) {
+            conditions = conditions.and(EVENTS.CATEGORY.eq(category));
+        }
+
+        return dsl.select(
+                        EVENTS.ID,
+                        EVENTS.TITLE,
+                        EVENTS.DESCRIPTION,
+                        EVENTS.EVENT_STATUS,
+                        EVENTS.OPEN_DATE,
+                        EVENTS.END_DATE,
+                        EVENTS.CATEGORY,
+                        VENUES.LOCATION,
+                        VENUES.NAME)
+                .from(EVENTS)
+                .join(VENUES).on(VENUES.ID.eq(EVENTS.VENUE_ID))
+                .where(conditions)
+                .fetch(record -> new GetRankedEventResponse(
+                        record.get(EVENTS.CATEGORY),
+                        new GetEventResponse(
+                                record.get(EVENTS.ID),
+                                record.get(EVENTS.TITLE),
+                                record.get(EVENTS.DESCRIPTION),
+                                record.get(VENUES.LOCATION),
+                                record.get(VENUES.NAME),
+                                record.get(EVENTS.EVENT_STATUS),
+                                record.get(EVENTS.OPEN_DATE),
+                                record.get(EVENTS.END_DATE)
+                        ),
+                        scoreMap.getOrDefault(record.get(EVENTS.ID), 0.0).longValue()
+                ))
+                .stream()
+                .sorted(Comparator.comparingLong(GetRankedEventResponse::viewScore).reversed())
+                .limit(TOP_N)
+                .collect(Collectors.toList());
+    }
+
+    // redis 가 비어있을 때... 그냥 최신순으로 출력해주기
+    public List<GetRankedEventResponse> findFallbackEvents(String category) {
+        var conditions = DSL.noCondition();
+
+        conditions = conditions.and(EVENTS.DELETED_AT.isNull());
+        conditions = conditions.and(EVENTS.EVENT_STATUS.eq(String.valueOf(EventStatus.SCHEDULED)));
+
+        if (category != null) {
+            conditions = conditions.and(EVENTS.CATEGORY.eq(category));
+        }
+
+//        return dsl.select(
+//                        EVENTS.ID,
+//                        EVENTS.TITLE,
+//                        EVENTS.DESCRIPTION,
+//                        EVENTS.EVENT_STATUS,
+//                        EVENTS.OPEN_DATE,
+//                        EVENTS.END_DATE,
+//                        EVENTS.CATEGORY,
+//                        VENUES.LOCATION,
+//                        VENUES.NAME)
+//                .from(EVENTS)
+//                .join(VENUES).on(VENUES.ID.eq(EVENTS.VENUE_ID))
+//                .where(conditions)
+//                .orderBy(EVENTS.OPEN_DATE.desc()) // 최신순
+//                .limit(TOP_N)
+//                .fetch(record -> new GetRankedEventResponse(
+//                        record.get(EVENTS.CATEGORY),
+//                        new GetEventResponse(
+//                                record.get(EVENTS.TITLE),
+//                                record.get(EVENTS.DESCRIPTION),
+//                                record.get(VENUES.LOCATION),
+//                                record.get(VENUES.NAME),
+//                                record.get(EVENTS.EVENT_STATUS),
+//                                record.get(EVENTS.OPEN_DATE),
+//                                record.get(EVENTS.END_DATE)
+//                        ),
+//                        0L // 조회수 없으면 0
+//                ));
+
+        return dsl.select(
+                        EVENTS.ID,
+                        EVENTS.TITLE,
+                        EVENTS.DESCRIPTION,
+                        EVENTS.EVENT_STATUS,
+                        EVENTS.OPEN_DATE,
+                        EVENTS.END_DATE,
+                        EVENTS.CATEGORY,
+                        VENUES.LOCATION,
+                        VENUES.NAME)
+                .from(EVENTS)
+                .join(VENUES).on(VENUES.ID.eq(EVENTS.VENUE_ID))
+                .where(conditions)
+                .orderBy(EVENTS.OPEN_DATE.asc())
+                .limit(TOP_N)
+                .fetch(record -> new GetRankedEventResponse(
+                        record.get(EVENTS.CATEGORY),
+                        new GetEventResponse(
+                                record.get(EVENTS.ID),
+                                record.get(EVENTS.TITLE),
+                                record.get(EVENTS.DESCRIPTION),
+                                record.get(VENUES.LOCATION),
+                                record.get(VENUES.NAME),
+                                record.get(EVENTS.EVENT_STATUS),
+                                record.get(EVENTS.OPEN_DATE),
+                                record.get(EVENTS.END_DATE)
+                        ),
+                        0L
+                ));
     }
 }
