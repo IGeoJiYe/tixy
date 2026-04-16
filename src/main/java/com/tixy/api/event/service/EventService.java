@@ -16,8 +16,11 @@ import com.tixy.api.venue.enums.Category;
 import com.tixy.api.venue.service.VenueService;
 import com.tixy.core.exception.event.EventErrorCode;
 import com.tixy.core.exception.event.EventServiceException;
+import com.tixy.core.security.dto.LoginUserInfoDto;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -25,6 +28,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.security.Principal;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
 @Slf4j
 @Service
@@ -39,6 +44,7 @@ public class EventService {
     private final EventRankingService eventRankingService;
 
     @Transactional
+    @CacheEvict(value = "eventSearch", allEntries = true)
     public CreateEventResponse save(CreateEventRequest request) {
         Venue venue = venueService.findVenueById(request.venueId());
 
@@ -71,28 +77,56 @@ public class EventService {
 
     // param: events Request dto
     // 주어진 조건에 따라 event list 를 paging 하여 return 합니다.
-    public Page<GetEventResponse> findAll(GetEventsRequest request, Pageable pageable) {
-        if (request.startDate()!=null && request.endDate()!=null){
-            if (request.startDate().isAfter(request.endDate())){
-                throw new EventServiceException(EventErrorCode.INVALID_EVENT_DATE);
-            }
+    public List<GetEventResponse> findAll(GetEventsRequest request, Pageable pageable) {
+        isValidDate(request.startDate(), request.endDate());
+        isValidPrice(request.startPrice(), request.endPrice());
+
+        return eventQueryRepository.findEventsByConditions(request, pageable).getContent();
+    }
+
+
+    @Cacheable(value = "eventSearch",
+            key = "#request.hashCode() + '_' + #pageable.pageNumber",
+            unless = "#result == null || #result.isEmpty()",
+            cacheManager = "localCacheManager")
+    public List<GetEventResponse> findAllV2(GetEventsRequest request, Pageable pageable) {
+        // 유효성 검증
+        isValidDate(request.startDate(), request.endDate());
+        isValidPrice(request.startPrice(), request.endPrice());
+
+        List<GetEventResponse> results =
+                eventQueryRepository.findEventsByConditions(request, pageable).getContent();
+
+        if (!results.isEmpty()) {
+            log.info("Local Cache Miss - DB 조회: {}", results.get(0));
         }
 
-        if (request.startPrice() != null && request.endPrice() != null){
-            if (request.startPrice() > request.endPrice()){
-                throw new EventServiceException(EventErrorCode.INVALID_PRICE_FILTER);
-            }
+        return results;
+    }
+
+    @Cacheable(value = "eventSearchRedis",
+            key = "#request.hashCode() + '_' + #pageable.pageNumber",
+            unless = "#result == null || #result.isEmpty()",
+            cacheManager = "redisCacheManager")
+    public List<GetEventResponse> findAllV3 (GetEventsRequest request, Pageable pageable){
+        isValidDate(request.startDate(), request.endDate());
+        isValidPrice(request.startPrice(), request.endPrice());
+
+        List<GetEventResponse> results =
+                eventQueryRepository.findEventsByConditions(request, pageable).getContent();
+
+        if (!results.isEmpty()) {
+            log.info("Redis Cache Miss - DB 조회: {}", results.get(0));
         }
 
-        return eventQueryRepository.findEventsByConditions(request, pageable);
+        return results;
     }
 
     // param: event id
     // 해당 event 를 찾아 상세 정보를 조회, return 합니다.
-    public GetEventResponse findOne(Long eventId, Principal principal) {
+    public GetEventResponse findOne(Long eventId, LoginUserInfoDto userInfo) {
         Event event = findEventById(eventId);
-        // Todo: principal 의 getName 에 ID 가 들어가는게 맞는지 확인, 아니라면 login user 정보 어케 가져오는지 보기
-        eventRankingService.countView(eventId, 4L);
+        eventRankingService.countView(eventId, userInfo.id());
         return GetEventResponse.from(event);
     }
 
@@ -102,7 +136,9 @@ public class EventService {
     // EventStatus 의 변경이 필요하다면 수정
     // Todo: 이벤트의 내용이 수정될 때 Event session 과 관련된 내용도 수정 되어야하는지 확인 필요
     @Transactional
+//    @CacheEvict(value = "event:view", key = "#eventId", cacheManager = "redisCacheManager")
     public GetEventResponse update(Long eventId, UpdateEventRequest request) {
+
         Event event = findEventById(eventId);
 
         // SCHEDULED 상태인지 이중검증
@@ -134,6 +170,8 @@ public class EventService {
             event.updateStatus(EventStatus.OPEN);
         }
 
+        eventRankingService.evictViewCache(eventId);
+
         return GetEventResponse.from(event);
     }
 
@@ -142,6 +180,7 @@ public class EventService {
     // soft Delete 로 삭제 구문을 요청하면 LocalDateTime deletedAt 과 boolean deleted 이 업데이트 됩니다.
     // Todo: session 정보도 모두 deleted 처리 해야할지, 아니면 어차피 event 에 들어가서 조회 가능한거니까 둬도 될지
     @Transactional
+//    @CacheEvict(value = "event:view", key = "#eventId", cacheManager = "redisCacheManager")
     public DeleteEventResponse delete(Long eventId) {
         Event event = findEventById(eventId);
 
@@ -151,6 +190,8 @@ public class EventService {
 
         event.updateStatus(EventStatus.CLOSED);
         eventRepository.delete(event);
+        eventRankingService.evictViewCache(eventId);
+
         return DeleteEventResponse.from(event);
     }
 
@@ -168,8 +209,18 @@ public class EventService {
 
     // event의 시작 날짜가 종료 날짜보다 앞인지 확인
     private void isValidDate(LocalDateTime startDate, LocalDateTime endDate){
-        if (startDate.isAfter(endDate)){
-            throw new EventServiceException(EventErrorCode.INVALID_EVENT_DATE);
+        if (startDate!=null && endDate!=null){
+            if (startDate.isAfter(endDate)){
+                throw new EventServiceException(EventErrorCode.INVALID_EVENT_DATE);
+            }
+        }
+    }
+
+    private void isValidPrice(Long startPrice, Long endPrice){
+        if (startPrice!=null && endPrice!=null){
+            if (startPrice > endPrice){
+                throw new EventServiceException(EventErrorCode.INVALID_PRICE_FILTER);
+            }
         }
     }
 }

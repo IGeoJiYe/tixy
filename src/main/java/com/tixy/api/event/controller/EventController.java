@@ -8,6 +8,7 @@ import com.tixy.api.event.dto.response.DeleteEventResponse;
 import com.tixy.api.event.dto.response.GetEventResponse;
 import com.tixy.api.event.service.EventService;
 import com.tixy.core.dto.ApiResponse;
+import com.tixy.core.security.dto.LoginUserInfoDto;
 import jakarta.validation.Valid;
 import jakarta.websocket.server.PathParam;
 import lombok.RequiredArgsConstructor;
@@ -20,6 +21,7 @@ import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
 import java.security.Principal;
+import java.util.List;
 
 @Slf4j
 @RestController
@@ -38,16 +40,30 @@ public class EventController {
     @GetMapping("/v1/{eventId}")
     public ResponseEntity<ApiResponse<GetEventResponse>> getOneEvent(
             @PathVariable Long eventId,
-            @AuthenticationPrincipal Principal principal){
+            @AuthenticationPrincipal LoginUserInfoDto userInfo){
         return ResponseEntity.status(HttpStatus.OK)
-                .body(ApiResponse.success(eventService.findOne(eventId, principal)));
+                .body(ApiResponse.success(eventService.findOne(eventId, userInfo)));
     }
 
     @GetMapping("/v1")
-    public ResponseEntity<ApiResponse<Page<GetEventResponse>>> getEvents(
+    public ResponseEntity<ApiResponse<List<GetEventResponse>>> getEvents(
             @ModelAttribute GetEventsRequest request, Pageable pageable) {
         return ResponseEntity.status(HttpStatus.OK)
                 .body(ApiResponse.success(eventService.findAll(request, pageable)));
+    }
+
+    @GetMapping("/v2")
+    public ResponseEntity<ApiResponse<List<GetEventResponse>>> getEventsWithLocalCache(
+            @ModelAttribute GetEventsRequest request, Pageable pageable) {
+        return ResponseEntity.status(HttpStatus.OK)
+                .body(ApiResponse.success(eventService.findAllV2(request, pageable)));
+    }
+
+    @GetMapping("/v3")
+    public ResponseEntity<ApiResponse<List<GetEventResponse>>> getEventsWithRedisCache(
+            @ModelAttribute GetEventsRequest request, Pageable pageable) {
+        return ResponseEntity.status(HttpStatus.OK)
+                .body(ApiResponse.success(eventService.findAllV3(request, pageable)));
     }
 
     @PutMapping("/v1/{eventId}")

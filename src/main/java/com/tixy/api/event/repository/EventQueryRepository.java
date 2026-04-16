@@ -8,7 +8,6 @@ import com.tixy.api.event.enums.EventSessionStatus;
 import com.tixy.api.event.enums.EventStatus;
 import com.tixy.api.ticket.dto.response.TicketSaleDateResponse;
 import com.tixy.api.ticket.enums.TicketTypeStatus;
-import com.tixy.jooq.tixy.Tables;
 import lombok.RequiredArgsConstructor;
 import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
@@ -91,7 +90,13 @@ public class EventQueryRepository {
 
         if (Boolean.TRUE.equals(request.reservePossible())) {
             conditions = conditions.and(
+                    TICKET_TYPES.TICKET_TYPE_STATUS.in("PENDING", "ON_SALE")
+            );
+            conditions = conditions.and(
                     EVENT_SESSIONS.STATUS.ne(String.valueOf(EventSessionStatus.CLOSED))
+            );
+            conditions = conditions.and(
+                    EVENTS.EVENT_STATUS.ne(String.valueOf(EventStatus.CLOSED))
             );
         }
 
@@ -105,9 +110,13 @@ public class EventQueryRepository {
                         VENUES.LOCATION,
                         VENUES.NAME)
                 .from(EVENTS)
+//                .leftJoin(EVENT_SESSIONS).on(EVENTS.ID.eq(EVENT_SESSIONS.EVENT_ID))
+//                .leftJoin(TICKET_TYPES).on(TICKET_TYPES.EVENT_SESSION_ID.eq(EVENT_SESSIONS.ID))
+//                .leftJoin(VENUES).on(VENUES.ID.eq(EVENTS.VENUE_ID))
                 .join(EVENT_SESSIONS).on(EVENTS.ID.eq(EVENT_SESSIONS.EVENT_ID))
                 .join(TICKET_TYPES).on(TICKET_TYPES.EVENT_SESSION_ID.eq(EVENT_SESSIONS.ID))
                 .join(VENUES).on(VENUES.ID.eq(EVENTS.VENUE_ID))
+
                 .where(conditions);
 
         // 전체 count (페이징용)

@@ -32,7 +32,7 @@ spring:
   data:
     redis:
       host: ${REDIS_HOST:localhost}
-      port: 6379
+      port: ${REDIS_PORT:6379}
       lettuce:
         pool:
           max-active: 8
@@ -42,6 +42,9 @@ spring:
     time-zone: Asia/Seoul
     serialization:
       write-dates-as-timestamps: false
+
+    cache:
+      type: none
 
 jwt:
   secret-key: ${JWT_SECRET_KEY}
