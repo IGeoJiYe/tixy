@@ -15,7 +15,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @Slf4j
 @RestController
-@RequestMapping("/api/payments")
+@RequestMapping("/tixy/api/payments")
 @RequiredArgsConstructor
 public class PaymentController {
 
