@@ -10,6 +10,8 @@ import com.tixy.api.ticket.dto.response.TicketSaleDateResponse;
 import com.tixy.api.ticket.enums.TicketTypeStatus;
 import lombok.RequiredArgsConstructor;
 import org.jooq.DSLContext;
+import org.jooq.SelectJoinStep;
+import org.jooq.SelectSelectStep;
 import org.jooq.impl.DSL;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
@@ -92,37 +94,24 @@ public class EventQueryRepository {
             conditions = conditions.and(
                     TICKET_TYPES.TICKET_TYPE_STATUS.in("PENDING", "ON_SALE")
             );
-//            conditions = conditions.and(
-//                    EVENT_SESSIONS.STATUS.ne(String.valueOf(EventSessionStatus.CLOSED))
-//            );
-//            conditions = conditions.and(
-//                    EVENTS.EVENT_STATUS.ne(String.valueOf(EventStatus.CLOSED))
-//            );
+            conditions = conditions.and(
+                    EVENT_SESSIONS.STATUS.eq(String.valueOf(EventSessionStatus.SCHEDULED))
+            );
+            conditions = conditions.and(
+                    EVENTS.EVENT_STATUS.ne(String.valueOf(EventStatus.CLOSED))
+            );
         }
 
-        var query = dsl.selectDistinct(
-                        EVENTS.ID,
-                        EVENTS.TITLE,
-                        EVENTS.DESCRIPTION,
-                        EVENTS.EVENT_STATUS,
-                        EVENTS.OPEN_DATE,
-                        EVENTS.END_DATE,
-                        VENUES.LOCATION,
-                        VENUES.NAME)
-                .from(EVENTS)
-//                .leftJoin(EVENT_SESSIONS).on(EVENTS.ID.eq(EVENT_SESSIONS.EVENT_ID))
-//                .leftJoin(TICKET_TYPES).on(TICKET_TYPES.EVENT_SESSION_ID.eq(EVENT_SESSIONS.ID))
-//                .leftJoin(VENUES).on(VENUES.ID.eq(EVENTS.VENUE_ID))
-                .join(EVENT_SESSIONS).on(EVENTS.ID.eq(EVENT_SESSIONS.EVENT_ID))
-                .join(TICKET_TYPES).on(TICKET_TYPES.EVENT_SESSION_ID.eq(EVENT_SESSIONS.ID))
-                .join(VENUES).on(VENUES.ID.eq(EVENTS.VENUE_ID))
-
-                .where(conditions);
-
-        // 전체 count (페이징용)
-        int total = dsl.fetchCount(query);
-
-        List<GetEventResponse> results = query
+        List<GetEventResponse> results = baseFrom(dsl.selectDistinct(
+                EVENTS.ID,
+                EVENTS.TITLE,
+                EVENTS.DESCRIPTION,
+                EVENTS.EVENT_STATUS,
+                EVENTS.OPEN_DATE,
+                EVENTS.END_DATE,
+                VENUES.LOCATION,
+                VENUES.NAME
+        )).where(conditions)
                 .orderBy(EVENTS.OPEN_DATE.asc())
                 .limit(pageable.getPageSize())
                 .offset(pageable.getOffset())
@@ -137,8 +126,128 @@ public class EventQueryRepository {
                         record.get(EVENTS.END_DATE)
                 ));
 
+        if (results.size() < pageable.getPageSize() && pageable.getOffset() == 0) {
+            // 첫 페이지인데 결과가 pageSize보다 적으면 total = 결과 수
+            return new PageImpl<>(results, pageable, results.size());
+        }
+
+        // 전체 count (페이징용)
+        // count 쿼리 최적화 전
+//        Integer totalCount = dsl.selectCount()
+//                .from(
+//                        baseFrom(dsl.selectDistinct(EVENTS.ID))
+//                                .where(conditions)
+//                ).fetchOne(0, Integer.class);
+//
+//        int total = (totalCount != null) ? totalCount: 0;
+        // count 쿼리 최적화 후
+        int total = countEventsWithExists(dsl, request);
+
         return new PageImpl<>(results, pageable, total);
 
+    }
+
+    private int countEventsWithExists(DSLContext dsl, GetEventsRequest request) {
+
+        // --- 조건을 테이블별로 분리 ---
+        var eventCond = DSL.noCondition();
+        var venueCond = DSL.noCondition();
+        var sessionCond = DSL.noCondition();
+        var ticketCond = DSL.noCondition();
+
+        boolean needVenue = false;
+        boolean needSessionTicket = false;
+
+        // events 조건
+        if (request.category() != null && !request.category().isEmpty()) {
+            eventCond = eventCond.and(EVENTS.CATEGORY.in(request.category()));
+        }
+        if (request.startDate() != null) {
+            eventCond = eventCond.and(EVENTS.OPEN_DATE.ge(request.startDate()));
+        }
+        if (request.endDate() != null) {
+            eventCond = eventCond.and(EVENTS.END_DATE.le(request.endDate()));
+        }
+        if (request.keyword() != null && !request.keyword().isBlank()) {
+            eventCond = eventCond.and(
+                    EVENTS.TITLE.containsIgnoreCase(request.keyword())
+                            .or(EVENTS.DESCRIPTION.containsIgnoreCase(request.keyword()))
+            );
+        }
+
+        // venues 조건
+        if (request.area() != null && !request.area().isEmpty()) {
+            venueCond = venueCond.and(VENUES.LOCATION.in(request.area()));
+            needVenue = true;
+        }
+
+        // ticket_types 조건
+        if (request.startPrice() != null) {
+            ticketCond = ticketCond.and(TICKET_TYPES.PRICE.ge(request.startPrice()));
+            needSessionTicket = true;
+        }
+        if (request.endPrice() != null) {
+            ticketCond = ticketCond.and(TICKET_TYPES.PRICE.le(request.endPrice()));
+            needSessionTicket = true;
+        }
+
+        // 예약 가능 필터
+        if (Boolean.TRUE.equals(request.reservePossible())) {
+            ticketCond = ticketCond.and(
+                    TICKET_TYPES.TICKET_TYPE_STATUS.in("PENDING", "ON_SALE")
+            );
+            sessionCond = sessionCond.and(
+                    EVENT_SESSIONS.STATUS.eq(String.valueOf(EventSessionStatus.SCHEDULED))
+            );
+            eventCond = eventCond.and(
+                    EVENTS.EVENT_STATUS.ne(String.valueOf(EventStatus.CLOSED))
+            );
+            needSessionTicket = true;
+        }
+
+        // --- EXISTS 서브쿼리 조립 ---
+        var query = dsl.selectCount()
+                .from(EVENTS)
+                .where(eventCond);
+
+        // session + ticket EXISTS (필요할 때만)
+        if (needSessionTicket) {
+            var ticketExists = DSL.exists(
+                    DSL.selectOne()
+                            .from(TICKET_TYPES)
+                            .where(TICKET_TYPES.EVENT_SESSION_ID.eq(EVENT_SESSIONS.ID))
+                            .and(ticketCond)
+            );
+
+            query = query.and(DSL.exists(
+                    DSL.selectOne()
+                            .from(EVENT_SESSIONS)
+                            .where(EVENT_SESSIONS.EVENT_ID.eq(EVENTS.ID))
+                            .and(sessionCond)
+                            .and(ticketExists)
+            ));
+        }
+
+        // venue EXISTS (지역 조건이 있을 때만)
+        if (needVenue) {
+            query = query.and(DSL.exists(
+                    DSL.selectOne()
+                            .from(VENUES)
+                            .where(VENUES.ID.eq(EVENTS.VENUE_ID))
+                            .and(venueCond)
+            ));
+        }
+
+        Integer count = query.fetchOne(0, Integer.class);
+        return (count != null) ? count : 0;
+    }
+
+    private SelectJoinStep<?> baseFrom(SelectSelectStep<?> select) {
+        return select
+                .from(EVENTS)
+                .join(EVENT_SESSIONS).on(EVENTS.ID.eq(EVENT_SESSIONS.EVENT_ID))
+                .join(TICKET_TYPES).on(TICKET_TYPES.EVENT_SESSION_ID.eq(EVENT_SESSIONS.ID))
+                .join(VENUES).on(VENUES.ID.eq(EVENTS.VENUE_ID));
     }
 
     // 특정 이벤트 세션의 티켓 가격 리스트를 반환
