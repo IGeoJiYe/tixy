@@ -9,7 +9,6 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import org.springframework.cache.CacheManager;
 import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.cache.caffeine.CaffeineCacheManager;
-import org.springframework.cache.concurrent.ConcurrentMapCacheManager;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
@@ -63,7 +62,6 @@ public class CacheConfig {
 
         Map<String, RedisCacheConfiguration> cacheConfigurations = Map.of(
                 "eventSearchRedis", defaultConfig.entryTtl(Duration.ofMinutes(5)),
-                "popularEvents", defaultConfig.entryTtl(Duration.ofMinutes(1)),
                 "event:view", defaultConfig.entryTtl(Duration.ofHours(25))
 
         );
