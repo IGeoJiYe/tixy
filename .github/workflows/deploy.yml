@@ -1,13 +1,12 @@
 name: Deploy Tixy
 
-# main 브랜치 push 또는 PR
 on:
   push:
-    branches: [main, feat/의존성추가]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: read    # 코드 체크아웃용 (체크아웃 - Repo에 있는 코드를 Runner에 옮김)
+  contents: read
 
 concurrency:
   group: tixy-production-deploy
@@ -21,13 +20,12 @@ env:
   REMOTE_JAR_PATH: /tmp/tixy.jar
   JAVA_VERSION: 17
 
-  # 권장 방식: GitHub Repository Secrets에 저장
   SSH_USER: ${{ secrets.SSH_USER }}
   SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
 
 jobs:
   build-and-deploy:
-    name: Build and rolling deploy
+    name: Build and rolling deploy with rollback
     runs-on: ubuntu-latest
 
     steps:
@@ -74,8 +72,8 @@ jobs:
 
           mkdir -p ~/.ssh
 
-          ssh-keyscan -p ${{ env.SERVER_1_PORT }} ${{ env.DEPLOY_HOST }} >> ~/.ssh/known_hosts
-          ssh-keyscan -p ${{ env.SERVER_2_PORT }} ${{ env.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+          ssh-keyscan -p "${SERVER_1_PORT}" "${DEPLOY_HOST}" >> ~/.ssh/known_hosts
+          ssh-keyscan -p "${SERVER_2_PORT}" "${DEPLOY_HOST}" >> ~/.ssh/known_hosts
 
       - name: Deploy to server 1
         run: |
@@ -96,29 +94,8 @@ jobs:
             -p "${SERVER_1_PORT}" \
             -o PreferredAuthentications=password,keyboard-interactive \
             -o PubkeyAuthentication=no \
-            "${SSH_USER}@${DEPLOY_HOST}" 'bash -s' << 'EOF'
-              set -e
-
-              /opt/tixy/scripts/release.sh
-
-              cp /tmp/tixy.jar /opt/tixy/current/tixy.jar
-              chmod 755 /opt/tixy/current/tixy.jar
-
-              /opt/tixy/scripts/restart.sh
-
-              for i in {1..30}; do
-                if /opt/tixy/scripts/healthcheck.sh; then
-                  echo "Server 1 healthcheck success"
-                  exit 0
-                fi
-
-                echo "Waiting for server 1 healthcheck..."
-                sleep 2
-              done
-
-              echo "Server 1 healthcheck failed"
-              exit 1
-          EOF
+            "${SSH_USER}@${DEPLOY_HOST}" \
+            "bash ${REMOTE_APP_DIR}/scripts/deploy-release.sh ${REMOTE_JAR_PATH}"
 
           unset SSHPASS
 
@@ -128,41 +105,45 @@ jobs:
 
           export SSHPASS="${SSH_PASSWORD}"
 
+          rollback_server_1() {
+            echo "Rolling back server 1 because server 2 deployment failed..."
+
+            if sshpass -e ssh \
+              -p "${SERVER_1_PORT}" \
+              -o PreferredAuthentications=password,keyboard-interactive \
+              -o PubkeyAuthentication=no \
+              "${SSH_USER}@${DEPLOY_HOST}" \
+              "bash ${REMOTE_APP_DIR}/scripts/rollback.sh"; then
+              echo "Server 1 rollback success"
+            else
+              echo "Server 1 rollback failed. Manual check required."
+            fi
+          }
+
           echo "Deploying to server 2..."
 
-          sshpass -e scp \
+          if ! sshpass -e scp \
             -P "${SERVER_2_PORT}" \
             -o PreferredAuthentications=password,keyboard-interactive \
             -o PubkeyAuthentication=no \
             ./tixy.jar \
-            "${SSH_USER}@${DEPLOY_HOST}:${REMOTE_JAR_PATH}"
+            "${SSH_USER}@${DEPLOY_HOST}:${REMOTE_JAR_PATH}"; then
+            echo "Server 2 jar upload failed"
+            rollback_server_1
+            exit 1
+          fi
 
-          sshpass -e ssh \
+          if ! sshpass -e ssh \
             -p "${SERVER_2_PORT}" \
             -o PreferredAuthentications=password,keyboard-interactive \
             -o PubkeyAuthentication=no \
-            "${SSH_USER}@${DEPLOY_HOST}" 'bash -s' << 'EOF'
-              set -e
+            "${SSH_USER}@${DEPLOY_HOST}" \
+            "bash ${REMOTE_APP_DIR}/scripts/deploy-release.sh ${REMOTE_JAR_PATH}"; then
+            echo "Server 2 deployment failed"
+            rollback_server_1
+            exit 1
+          fi
 
-              /opt/tixy/scripts/release.sh
-
-              cp /tmp/tixy.jar /opt/tixy/current/tixy.jar
-              chmod 755 /opt/tixy/current/tixy.jar
-
-              /opt/tixy/scripts/restart.sh
-
-              for i in {1..30}; do
-                if /opt/tixy/scripts/healthcheck.sh; then
-                  echo "Server 2 healthcheck success"
-                  exit 0
-                fi
-
-                echo "Waiting for server 2 healthcheck..."
-                sleep 2
-              done
-
-              echo "Server 2 healthcheck failed"
-              exit 1
-          EOF
+          echo "Rolling deployment success on both servers"
 
           unset SSHPASS
